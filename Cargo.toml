@@ -1,6 +1,6 @@
 [package]
 name = "hyper_wasi"
-version = "0.15.0"
+version = "1.0.0"
 description = "A fast and correct HTTP library."
 readme = "README.md"
 homepage = "https://github.com/WasmEdge/hyper/tree/master"
@@ -29,15 +29,14 @@ futures-core = { version = "0.3", default-features = false }
 futures-channel = "0.3"
 futures-util = { version = "0.3", default-features = false }
 http = "0.2"
-http-body = "0.4"
-# http-body-util = "0.4"
+http-body = "1.0.0-rc.1"
+http-body-util = { version = "0.1.0-rc.1", optional = true }
 httpdate = "1.0"
-httparse = "1.6"
+httparse = "1.8"
 h2_wasi = { version = "0.3.14", optional = true }
 itoa = "1"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 pin-project-lite = "0.2.4"
-tower-service = "0.3"
 tokio_wasi = { version="1", features = ["sync"] }
 want = "0.3"
 
@@ -49,6 +48,7 @@ wasmedge_wasi_socket = {version = "0.4.2", optional = true }
 
 [dev-dependencies]
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+http-body-util = "0.1.0-rc.1"
 matches = "0.1"
 num_cpus = "1.0"
 pretty_env_logger = "0.4"
@@ -58,6 +58,7 @@ serde_json = "1.0"
 tokio_wasi = { version = "1", features = [
     "fs",
     "macros",
+    "net",
     "io-std",
     "io-util",
     "rt",
@@ -68,7 +69,6 @@ tokio_wasi = { version = "1", features = [
 ] }
 # tokio-test = "0.4"
 tokio-util_wasi = { version = "0.7", features = ["codec"] }
-# tower = { version = "0.4", features = ["make", "util"] }
 url = "2.2"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
@@ -84,7 +84,6 @@ full = [
     "http1",
     "http2",
     "server",
-    "runtime",
 ]
 
 # HTTP versions
@@ -95,21 +94,8 @@ http2 = ["h2_wasi"]
 client = []
 server = []
 
-# Tokio support
-runtime = [
-    "tcp",
-    "tokio_wasi/rt",
-    "tokio_wasi/time",
-]
-tcp = [
-    "wasmedge_wasi_socket",
-    "tokio_wasi/net",
-    "tokio_wasi/rt",
-    "tokio_wasi/time",
-]
-
 # C-API support (currently unstable (no semver))
-ffi = ["libc"]
+ffi = ["libc", "http-body-util"]
 
 # internal features used in CI
 nightly = []
@@ -188,16 +174,6 @@ required-features = ["full"]
 [[example]]
 name = "state"
 path = "examples/state.rs"
-required-features = ["full"]
-
-[[example]]
-name = "tower_client"
-path = "examples/tower_client.rs"
-required-features = ["full"]
-
-[[example]]
-name = "tower_server"
-path = "examples/tower_server.rs"
 required-features = ["full"]
 
 [[example]]

@@ -49,9 +49,6 @@
 //! - `http2`: Enables HTTP/2 support.
 //! - `client`: Enables the HTTP `client`.
 //! - `server`: Enables the HTTP `server`.
-//! - `runtime`: Enables convenient integration with `tokio`, providing
-//!   connectors and acceptors for TCP, and a default executor.
-//! - `tcp`: Enables convenient implementations over TCP (using tokio).
 //!
 //! [feature flags]: https://doc.rust-lang.org/cargo/reference/manifest.html#the-features-section
 
@@ -66,7 +63,6 @@ pub use crate::http::{header, Method, Request, Response, StatusCode, Uri, Versio
 #[doc(no_inline)]
 pub use crate::http::HeaderMap;
 
-pub use crate::body::Body;
 pub use crate::error::{Error, Result};
 
 #[macro_use]
@@ -94,15 +90,10 @@ cfg_feature! {
     #![feature = "client"]
 
     pub mod client;
-    #[cfg(any(feature = "http1", feature = "http2"))]
-    #[doc(no_inline)]
-    pub use crate::client::Client;
 }
 
 cfg_feature! {
     #![feature = "server"]
 
     pub mod server;
-    #[doc(no_inline)]
-    pub use crate::server::Server;
 }

@@ -4,54 +4,61 @@
 extern crate test;
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use futures_util::{stream, StreamExt};
-use http_body_util::StreamBody;
+use http_body_util::{BodyExt, Full, StreamBody};
 use tokio::sync::oneshot;
 
-use hyper::service::{make_service_fn, service_fn};
-use hyper::{Response, Server};
+use hyper::body::Frame;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::Response;
 
 macro_rules! bench_server {
     ($b:ident, $header:expr, $body:expr) => {{
         let _ = pretty_env_logger::try_init();
         let (_until_tx, until_rx) = oneshot::channel::<()>();
+
         let addr = {
             let (addr_tx, addr_rx) = mpsc::channel();
             std::thread::spawn(move || {
-                let addr = "127.0.0.1:0".parse().unwrap();
-                let make_svc = make_service_fn(|_| async {
-                    Ok::<_, hyper::Error>(service_fn(|_| async {
-                        Ok::<_, hyper::Error>(
-                            Response::builder()
-                                .header($header.0, $header.1)
-                                .header("content-type", "text/plain")
-                                .body($body())
-                                .unwrap(),
-                        )
-                    }))
-                });
-
+                let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .expect("rt build");
 
-                let srv = rt.block_on(async move { Server::bind(&addr).serve(make_svc) });
+                let listener = rt.block_on(tokio::net::TcpListener::bind(addr)).unwrap();
+                let addr = listener.local_addr().unwrap();
 
-                addr_tx.send(srv.local_addr()).unwrap();
+                rt.spawn(async move {
+                    loop {
+                        let (stream, _) = listener.accept().await.expect("accept");
 
-                let graceful = srv.with_graceful_shutdown(async {
-                    until_rx.await.ok();
-                });
-                rt.block_on(async move {
-                    if let Err(e) = graceful.await {
-                        panic!("server error: {}", e);
+                        http1::Builder::new()
+                            .serve_connection(
+                                stream,
+                                service_fn(|_| async {
+                                    Ok::<_, hyper::Error>(
+                                        Response::builder()
+                                            .header($header.0, $header.1)
+                                            .header("content-type", "text/plain")
+                                            .body($body())
+                                            .unwrap(),
+                                    )
+                                }),
+                            )
+                            .await
+                            .unwrap();
                     }
                 });
+
+                addr_tx.send(addr).unwrap();
+                rt.block_on(until_rx).ok();
             });
 
             addr_rx.recv().unwrap()
@@ -82,8 +89,8 @@ macro_rules! bench_server {
     }};
 }
 
-fn body(b: &'static [u8]) -> hyper::Body {
-    b.into()
+fn body(b: &'static [u8]) -> Full<Bytes> {
+    Full::new(b.into())
 }
 
 #[bench]
@@ -100,9 +107,11 @@ fn throughput_fixedsize_large_payload(b: &mut test::Bencher) {
 
 #[bench]
 fn throughput_fixedsize_many_chunks(b: &mut test::Bencher) {
-    bench_server!(b, ("content-length", "1000000"), || {
+    bench_server!(b, ("content-length", "1000000"), move || {
         static S: &[&[u8]] = &[&[b'x'; 1_000] as &[u8]; 1_000] as _;
-        StreamBody::new(stream::iter(S.iter()).map(|&s| Ok::<_, String>(s)))
+        BodyExt::boxed(StreamBody::new(
+            stream::iter(S.iter()).map(|&s| Ok::<_, String>(Frame::data(s))),
+        ))
     })
 }
 
@@ -124,7 +133,9 @@ fn throughput_chunked_large_payload(b: &mut test::Bencher) {
 fn throughput_chunked_many_chunks(b: &mut test::Bencher) {
     bench_server!(b, ("transfer-encoding", "chunked"), || {
         static S: &[&[u8]] = &[&[b'x'; 1_000] as &[u8]; 1_000] as _;
-        StreamBody::new(stream::iter(S.iter()).map(|&s| Ok::<_, String>(s)))
+        BodyExt::boxed(StreamBody::new(
+            stream::iter(S.iter()).map(|&s| Ok::<_, String>(Frame::data(s))),
+        ))
     })
 }
 

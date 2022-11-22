@@ -3,34 +3,24 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-#[cfg(all(feature = "server", any(feature = "http1", feature = "http2")))]
-use crate::body::Body;
 #[cfg(feature = "server")]
-use crate::body::HttpBody;
+use crate::body::Body;
 #[cfg(all(feature = "http2", feature = "server"))]
 use crate::proto::h2::server::H2Stream;
 use crate::rt::Executor;
-#[cfg(all(feature = "server", any(feature = "http1", feature = "http2")))]
-use crate::server::server::{new_svc::NewSvcTask, Watcher};
-#[cfg(all(feature = "server", any(feature = "http1", feature = "http2")))]
-use crate::service::HttpService;
 
 #[cfg(feature = "server")]
-pub trait ConnStreamExec<F, B: HttpBody>: Clone {
+pub trait ConnStreamExec<F, B: Body>: Clone {
     fn execute_h2stream(&mut self, fut: H2Stream<F, B>);
-}
-
-#[cfg(all(feature = "server", any(feature = "http1", feature = "http2")))]
-pub trait NewSvcExec<I, N, S: HttpService<Body>, E, W: Watcher<I, S, E>>: Clone {
-    fn execute_new_svc(&mut self, fut: NewSvcTask<I, N, S, E, W>);
 }
 
 pub(crate) type BoxSendFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
-// Either the user provides an executor for background tasks, or we use
-// `tokio::spawn`.
+// Either the user provides an executor for background tasks, or we panic.
+// TODO: with the `runtime`feature, `Exec::Default` used `tokio::spawn`. With the
+// removal of the opt-in default runtime, this should be refactored.
 #[derive(Clone)]
-pub enum Exec {
+pub(crate) enum Exec {
     Default,
     Executor(Arc<dyn Executor<BoxSendFuture> + Send + Sync>),
 }
@@ -44,15 +34,7 @@ impl Exec {
     {
         match *self {
             Exec::Default => {
-                #[cfg(feature = "tcp")]
-                {
-                    tokio::task::spawn(fut);
-                }
-                #[cfg(not(feature = "tcp"))]
-                {
-                    // If no runtime, we need an executor!
-                    panic!("executor must be set")
-                }
+                panic!("executor must be set");
             }
             Exec::Executor(ref e) => {
                 e.execute(Box::pin(fut));
@@ -71,21 +53,9 @@ impl fmt::Debug for Exec {
 impl<F, B> ConnStreamExec<F, B> for Exec
 where
     H2Stream<F, B>: Future<Output = ()> + Send + 'static,
-    B: HttpBody,
+    B: Body,
 {
     fn execute_h2stream(&mut self, fut: H2Stream<F, B>) {
-        self.execute(fut)
-    }
-}
-
-#[cfg(all(feature = "server", any(feature = "http1", feature = "http2")))]
-impl<I, N, S, E, W> NewSvcExec<I, N, S, E, W> for Exec
-where
-    NewSvcTask<I, N, S, E, W>: Future<Output = ()> + Send + 'static,
-    S: HttpService<Body>,
-    W: Watcher<I, S, E>,
-{
-    fn execute_new_svc(&mut self, fut: NewSvcTask<I, N, S, E, W>) {
         self.execute(fut)
     }
 }
@@ -97,22 +67,9 @@ impl<E, F, B> ConnStreamExec<F, B> for E
 where
     E: Executor<H2Stream<F, B>> + Clone,
     H2Stream<F, B>: Future<Output = ()>,
-    B: HttpBody,
+    B: Body,
 {
     fn execute_h2stream(&mut self, fut: H2Stream<F, B>) {
-        self.execute(fut)
-    }
-}
-
-#[cfg(all(feature = "server", any(feature = "http1", feature = "http2")))]
-impl<I, N, S, E, W> NewSvcExec<I, N, S, E, W> for E
-where
-    E: Executor<NewSvcTask<I, N, S, E, W>> + Clone,
-    NewSvcTask<I, N, S, E, W>: Future<Output = ()>,
-    S: HttpService<Body>,
-    W: Watcher<I, S, E>,
-{
-    fn execute_new_svc(&mut self, fut: NewSvcTask<I, N, S, E, W>) {
         self.execute(fut)
     }
 }
@@ -130,7 +87,7 @@ pub struct H2Stream<F, B>(std::marker::PhantomData<(F, B)>);
 impl<F, B, E> Future for H2Stream<F, B>
 where
     F: Future<Output = Result<http::Response<B>, E>>,
-    B: crate::body::HttpBody,
+    B: crate::body::Body,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     E: Into<Box<dyn std::error::Error + Send + Sync>>,
 {

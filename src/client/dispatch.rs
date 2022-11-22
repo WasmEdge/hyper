@@ -1,13 +1,13 @@
 #[cfg(feature = "http2")]
 use std::future::Future;
 
-use futures_util::FutureExt;
 use tokio::sync::{mpsc, oneshot};
 
 #[cfg(feature = "http2")]
 use crate::common::Pin;
 use crate::common::{task, Poll};
 
+#[cfg(test)]
 pub(crate) type RetryPromise<T, U> = oneshot::Receiver<Result<U, (crate::Error, Option<T>)>>;
 pub(crate) type Promise<T> = oneshot::Receiver<Result<T, crate::Error>>;
 
@@ -59,13 +59,16 @@ impl<T, U> Sender<T, U> {
             .map_err(|_| crate::Error::new_closed())
     }
 
+    #[cfg(test)]
     pub(crate) fn is_ready(&self) -> bool {
         self.giver.is_wanting()
     }
 
+    /*
     pub(crate) fn is_closed(&self) -> bool {
         self.giver.is_canceled()
     }
+    */
 
     fn can_send(&mut self) -> bool {
         if self.giver.give() || !self.buffered_once {
@@ -80,13 +83,14 @@ impl<T, U> Sender<T, U> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn try_send(&mut self, val: T) -> Result<RetryPromise<T, U>, T> {
         if !self.can_send() {
             return Err(val);
         }
         let (tx, rx) = oneshot::channel();
         self.inner
-            .send(Envelope(Some((val, Callback::Retry(tx)))))
+            .send(Envelope(Some((val, Callback::Retry(Some(tx))))))
             .map(move |_| rx)
             .map_err(|mut e| (e.0).0.take().expect("envelope not dropped").0)
     }
@@ -97,7 +101,7 @@ impl<T, U> Sender<T, U> {
         }
         let (tx, rx) = oneshot::channel();
         self.inner
-            .send(Envelope(Some((val, Callback::NoRetry(tx)))))
+            .send(Envelope(Some((val, Callback::NoRetry(Some(tx))))))
             .map(move |_| rx)
             .map_err(|mut e| (e.0).0.take().expect("envelope not dropped").0)
     }
@@ -113,18 +117,29 @@ impl<T, U> Sender<T, U> {
 
 #[cfg(feature = "http2")]
 impl<T, U> UnboundedSender<T, U> {
+    /*
     pub(crate) fn is_ready(&self) -> bool {
         !self.giver.is_canceled()
     }
+    */
 
     pub(crate) fn is_closed(&self) -> bool {
         self.giver.is_canceled()
     }
 
+    #[cfg(test)]
     pub(crate) fn try_send(&mut self, val: T) -> Result<RetryPromise<T, U>, T> {
         let (tx, rx) = oneshot::channel();
         self.inner
-            .send(Envelope(Some((val, Callback::Retry(tx)))))
+            .send(Envelope(Some((val, Callback::Retry(Some(tx))))))
+            .map(move |_| rx)
+            .map_err(|mut e| (e.0).0.take().expect("envelope not dropped").0)
+    }
+
+    pub(crate) fn send(&mut self, val: T) -> Result<Promise<U>, T> {
+        let (tx, rx) = oneshot::channel();
+        self.inner
+            .send(Envelope(Some((val, Callback::NoRetry(Some(tx))))))
             .map(move |_| rx)
             .map_err(|mut e| (e.0).0.take().expect("envelope not dropped").0)
     }
@@ -169,6 +184,7 @@ impl<T, U> Receiver<T, U> {
 
     #[cfg(feature = "http1")]
     pub(crate) fn try_recv(&mut self) -> Option<(T, Callback<T, U>)> {
+        use futures_util::FutureExt;
         match self.inner.recv().now_or_never() {
             Some(Some(mut env)) => env.0.take(),
             _ => None,
@@ -198,33 +214,60 @@ impl<T, U> Drop for Envelope<T, U> {
 }
 
 pub(crate) enum Callback<T, U> {
-    Retry(oneshot::Sender<Result<U, (crate::Error, Option<T>)>>),
-    NoRetry(oneshot::Sender<Result<U, crate::Error>>),
+    #[allow(unused)]
+    Retry(Option<oneshot::Sender<Result<U, (crate::Error, Option<T>)>>>),
+    NoRetry(Option<oneshot::Sender<Result<U, crate::Error>>>),
+}
+
+impl<T, U> Drop for Callback<T, U> {
+    fn drop(&mut self) {
+        // FIXME(nox): What errors do we want here?
+        let error = crate::Error::new_user_dispatch_gone().with(if std::thread::panicking() {
+            "user code panicked"
+        } else {
+            "runtime dropped the dispatch task"
+        });
+
+        match self {
+            Callback::Retry(tx) => {
+                if let Some(tx) = tx.take() {
+                    let _ = tx.send(Err((error, None)));
+                }
+            }
+            Callback::NoRetry(tx) => {
+                if let Some(tx) = tx.take() {
+                    let _ = tx.send(Err(error));
+                }
+            }
+        }
+    }
 }
 
 impl<T, U> Callback<T, U> {
     #[cfg(feature = "http2")]
     pub(crate) fn is_canceled(&self) -> bool {
         match *self {
-            Callback::Retry(ref tx) => tx.is_closed(),
-            Callback::NoRetry(ref tx) => tx.is_closed(),
+            Callback::Retry(Some(ref tx)) => tx.is_closed(),
+            Callback::NoRetry(Some(ref tx)) => tx.is_closed(),
+            _ => unreachable!(),
         }
     }
 
     pub(crate) fn poll_canceled(&mut self, cx: &mut task::Context<'_>) -> Poll<()> {
         match *self {
-            Callback::Retry(ref mut tx) => tx.poll_closed(cx),
-            Callback::NoRetry(ref mut tx) => tx.poll_closed(cx),
+            Callback::Retry(Some(ref mut tx)) => tx.poll_closed(cx),
+            Callback::NoRetry(Some(ref mut tx)) => tx.poll_closed(cx),
+            _ => unreachable!(),
         }
     }
 
-    pub(crate) fn send(self, val: Result<U, (crate::Error, Option<T>)>) {
+    pub(crate) fn send(mut self, val: Result<U, (crate::Error, Option<T>)>) {
         match self {
-            Callback::Retry(tx) => {
-                let _ = tx.send(val);
+            Callback::Retry(ref mut tx) => {
+                let _ = tx.take().unwrap().send(val);
             }
-            Callback::NoRetry(tx) => {
-                let _ = tx.send(val.map_err(|e| e.0));
+            Callback::NoRetry(ref mut tx) => {
+                let _ = tx.take().unwrap().send(val.map_err(|e| e.0));
             }
         }
     }
@@ -301,6 +344,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(miri))]
     #[tokio::test]
     async fn drop_receiver_sends_cancel_errors() {
         let _ = pretty_env_logger::try_init();
@@ -323,6 +367,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(miri))]
     #[tokio::test]
     async fn sender_checks_for_want_on_send() {
         let (mut tx, mut rx) = channel::<Custom, ()>();
@@ -360,16 +405,15 @@ mod tests {
     #[cfg(feature = "nightly")]
     #[bench]
     fn giver_queue_throughput(b: &mut test::Bencher) {
-        use crate::{Body, Request, Response};
+        use crate::{body::Incoming, Request, Response};
 
         let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
             .build()
             .unwrap();
-        let (mut tx, mut rx) = channel::<Request<Body>, Response<Body>>();
+        let (mut tx, mut rx) = channel::<Request<Incoming>, Response<Incoming>>();
 
         b.iter(move || {
-            let _ = tx.send(Request::default()).unwrap();
+            let _ = tx.send(Request::new(Incoming::empty())).unwrap();
             rt.block_on(async {
                 loop {
                     let poll_once = PollOnce(&mut rx);
@@ -386,7 +430,6 @@ mod tests {
     #[bench]
     fn giver_queue_not_ready(b: &mut test::Bencher) {
         let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
             .build()
             .unwrap();
         let (_tx, mut rx) = channel::<i32, ()>();

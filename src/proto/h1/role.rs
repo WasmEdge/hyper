@@ -1,5 +1,7 @@
 use std::fmt::{self, Write};
 use std::mem::MaybeUninit;
+#[cfg(feature = "server")]
+use std::time::Instant;
 
 use bytes::Bytes;
 use bytes::BytesMut;
@@ -7,8 +9,6 @@ use bytes::BytesMut;
 use http::header::ValueIter;
 use http::header::{self, Entry, HeaderName, HeaderValue};
 use http::{HeaderMap, Method, StatusCode, Version};
-#[cfg(all(feature = "server", feature = "runtime"))]
-use tokio::time::Instant;
 use tracing::{debug, error, trace, trace_span, warn};
 
 use crate::body::DecodedLength;
@@ -75,7 +75,7 @@ where
     let span = trace_span!("parse_headers");
     let _s = span.enter();
 
-    #[cfg(all(feature = "server", feature = "runtime"))]
+    #[cfg(feature = "server")]
     if !*ctx.h1_header_read_timeout_running {
         if let Some(h1_header_read_timeout) = ctx.h1_header_read_timeout {
             let deadline = Instant::now() + h1_header_read_timeout;
@@ -83,12 +83,12 @@ where
             match ctx.h1_header_read_timeout_fut {
                 Some(h1_header_read_timeout_fut) => {
                     debug!("resetting h1 header read timeout timer");
-                    h1_header_read_timeout_fut.as_mut().reset(deadline);
+                    ctx.timer.reset(h1_header_read_timeout_fut, deadline);
                 }
                 None => {
                     debug!("setting h1 header read timeout timer");
                     *ctx.h1_header_read_timeout_fut =
-                        Some(Box::pin(tokio::time::sleep_until(deadline)));
+                        Some(crate::common::into_pin(ctx.timer.sleep_until(deadline)));
                 }
             }
         }
@@ -673,7 +673,7 @@ impl Server {
                     }
                     match msg.body {
                         Some(BodyLength::Known(known_len)) => {
-                            // The HttpBody claims to know a length, and
+                            // The Body claims to know a length, and
                             // the headers are already set. For performance
                             // reasons, we are just going to trust that
                             // the values match.
@@ -706,7 +706,7 @@ impl Server {
                             continue 'headers;
                         }
                         Some(BodyLength::Unknown) => {
-                            // The HttpBody impl didn't know how long the
+                            // The Body impl didn't know how long the
                             // body is, but a length header was included.
                             // We have to parse the value to return our
                             // Encoder...
@@ -990,14 +990,10 @@ impl Http1Transaction for Client {
                 .h1_parser_config
                 .obsolete_multiline_headers_in_responses_are_allowed()
             {
-                for header in &headers_indices[..headers_len] {
+                for header in &mut headers_indices[..headers_len] {
                     // SAFETY: array is valid up to `headers_len`
-                    let header = unsafe { &*header.as_ptr() };
-                    for b in &mut slice[header.value.0..header.value.1] {
-                        if *b == b'\r' || *b == b'\n' {
-                            *b = b' ';
-                        }
-                    }
+                    let header = unsafe { &mut *header.as_mut_ptr() };
+                    Client::obs_fold_line(&mut slice, header);
                 }
             }
 
@@ -1068,11 +1064,6 @@ impl Http1Transaction for Client {
                 extensions.insert(reason);
             }
 
-            #[cfg(feature = "ffi")]
-            if ctx.raw_headers {
-                extensions.insert(crate::ffi::RawHeaders(crate::ffi::hyper_buf(slice)));
-            }
-
             let head = MessageHead {
                 version,
                 subject: status,
@@ -1094,7 +1085,7 @@ impl Http1Transaction for Client {
             #[cfg(feature = "ffi")]
             if head.subject.is_informational() {
                 if let Some(callback) = ctx.on_informational {
-                    callback.call(head.into_response(crate::Body::empty()));
+                    callback.call(head.into_response(crate::body::Incoming::empty()));
                 }
             }
 
@@ -1246,7 +1237,7 @@ impl Client {
         let headers = &mut head.headers;
 
         // If the user already set specific headers, we should respect them, regardless
-        // of what the HttpBody knows about itself. They set them for a reason.
+        // of what the Body knows about itself. They set them for a reason.
 
         // Because of the borrow checker, we can't check the for an existing
         // Content-Length header while holding an `Entry` for the Transfer-Encoding
@@ -1343,6 +1334,65 @@ impl Client {
         };
 
         set_content_length(headers, len)
+    }
+
+    fn obs_fold_line(all: &mut [u8], idx: &mut HeaderIndices) {
+        // If the value has obs-folded text, then in-place shift the bytes out
+        // of here.
+        //
+        // https://httpwg.org/specs/rfc9112.html#line.folding
+        //
+        // > A user agent that receives an obs-fold MUST replace each received
+        // > obs-fold with one or more SP octets prior to interpreting the
+        // > field value.
+        //
+        // This means strings like "\r\n\t foo" must replace the "\r\n\t " with
+        // a single space.
+
+        let buf = &mut all[idx.value.0..idx.value.1];
+
+        // look for a newline, otherwise bail out
+        let first_nl = match buf.iter().position(|b| *b == b'\n') {
+            Some(i) => i,
+            None => return,
+        };
+
+        // not on standard slices because whatever, sigh
+        fn trim_start(mut s: &[u8]) -> &[u8] {
+            while let [first, rest @ ..] = s {
+                if first.is_ascii_whitespace() {
+                    s = rest;
+                } else {
+                    break;
+                }
+            }
+            s
+        }
+
+        fn trim_end(mut s: &[u8]) -> &[u8] {
+            while let [rest @ .., last] = s {
+                if last.is_ascii_whitespace() {
+                    s = rest;
+                } else {
+                    break;
+                }
+            }
+            s
+        }
+
+        fn trim(s: &[u8]) -> &[u8] {
+            trim_start(trim_end(s))
+        }
+
+        // TODO(perf): we could do the moves in-place, but this is so uncommon
+        // that it shouldn't matter.
+        let mut unfolded = trim_end(&buf[..first_nl]).to_vec();
+        for line in buf[first_nl + 1..].split(|b| *b == b'\n') {
+            unfolded.push(b' ');
+            unfolded.extend_from_slice(trim(line));
+        }
+        buf[..unfolded.len()].copy_from_slice(&unfolded);
+        idx.value.1 = idx.value.0 + unfolded.len();
     }
 }
 
@@ -1510,6 +1560,8 @@ fn extend(dst: &mut Vec<u8>, data: &[u8]) {
 mod tests {
     use bytes::BytesMut;
 
+    use crate::common::time::Time;
+
     use super::*;
 
     #[test]
@@ -1523,20 +1575,16 @@ mod tests {
                 cached_headers: &mut None,
                 req_method: &mut method,
                 h1_parser_config: Default::default(),
-                #[cfg(feature = "runtime")]
                 h1_header_read_timeout: None,
-                #[cfg(feature = "runtime")]
                 h1_header_read_timeout_fut: &mut None,
-                #[cfg(feature = "runtime")]
                 h1_header_read_timeout_running: &mut false,
+                timer: Time::Empty,
                 preserve_header_case: false,
                 #[cfg(feature = "ffi")]
                 preserve_header_order: false,
                 h09_responses: false,
                 #[cfg(feature = "ffi")]
                 on_informational: &mut None,
-                #[cfg(feature = "ffi")]
-                raw_headers: false,
             },
         )
         .unwrap()
@@ -1558,20 +1606,16 @@ mod tests {
             cached_headers: &mut None,
             req_method: &mut Some(crate::Method::GET),
             h1_parser_config: Default::default(),
-            #[cfg(feature = "runtime")]
             h1_header_read_timeout: None,
-            #[cfg(feature = "runtime")]
             h1_header_read_timeout_fut: &mut None,
-            #[cfg(feature = "runtime")]
             h1_header_read_timeout_running: &mut false,
+            timer: Time::Empty,
             preserve_header_case: false,
             #[cfg(feature = "ffi")]
             preserve_header_order: false,
             h09_responses: false,
             #[cfg(feature = "ffi")]
             on_informational: &mut None,
-            #[cfg(feature = "ffi")]
-            raw_headers: false,
         };
         let msg = Client::parse(&mut raw, ctx).unwrap().unwrap();
         assert_eq!(raw.len(), 0);
@@ -1588,20 +1632,16 @@ mod tests {
             cached_headers: &mut None,
             req_method: &mut None,
             h1_parser_config: Default::default(),
-            #[cfg(feature = "runtime")]
             h1_header_read_timeout: None,
-            #[cfg(feature = "runtime")]
             h1_header_read_timeout_fut: &mut None,
-            #[cfg(feature = "runtime")]
             h1_header_read_timeout_running: &mut false,
+            timer: Time::Empty,
             preserve_header_case: false,
             #[cfg(feature = "ffi")]
             preserve_header_order: false,
             h09_responses: false,
             #[cfg(feature = "ffi")]
             on_informational: &mut None,
-            #[cfg(feature = "ffi")]
-            raw_headers: false,
         };
         Server::parse(&mut raw, ctx).unwrap_err();
     }
@@ -1616,20 +1656,16 @@ mod tests {
             cached_headers: &mut None,
             req_method: &mut Some(crate::Method::GET),
             h1_parser_config: Default::default(),
-            #[cfg(feature = "runtime")]
             h1_header_read_timeout: None,
-            #[cfg(feature = "runtime")]
             h1_header_read_timeout_fut: &mut None,
-            #[cfg(feature = "runtime")]
             h1_header_read_timeout_running: &mut false,
+            timer: Time::Empty,
             preserve_header_case: false,
             #[cfg(feature = "ffi")]
             preserve_header_order: false,
             h09_responses: true,
             #[cfg(feature = "ffi")]
             on_informational: &mut None,
-            #[cfg(feature = "ffi")]
-            raw_headers: false,
         };
         let msg = Client::parse(&mut raw, ctx).unwrap().unwrap();
         assert_eq!(raw, H09_RESPONSE);
@@ -1646,20 +1682,16 @@ mod tests {
             cached_headers: &mut None,
             req_method: &mut Some(crate::Method::GET),
             h1_parser_config: Default::default(),
-            #[cfg(feature = "runtime")]
             h1_header_read_timeout: None,
-            #[cfg(feature = "runtime")]
             h1_header_read_timeout_fut: &mut None,
-            #[cfg(feature = "runtime")]
             h1_header_read_timeout_running: &mut false,
+            timer: Time::Empty,
             preserve_header_case: false,
             #[cfg(feature = "ffi")]
             preserve_header_order: false,
             h09_responses: false,
             #[cfg(feature = "ffi")]
             on_informational: &mut None,
-            #[cfg(feature = "ffi")]
-            raw_headers: false,
         };
         Client::parse(&mut raw, ctx).unwrap_err();
         assert_eq!(raw, H09_RESPONSE);
@@ -1680,20 +1712,16 @@ mod tests {
             cached_headers: &mut None,
             req_method: &mut Some(crate::Method::GET),
             h1_parser_config,
-            #[cfg(feature = "runtime")]
             h1_header_read_timeout: None,
-            #[cfg(feature = "runtime")]
             h1_header_read_timeout_fut: &mut None,
-            #[cfg(feature = "runtime")]
             h1_header_read_timeout_running: &mut false,
+            timer: Time::Empty,
             preserve_header_case: false,
             #[cfg(feature = "ffi")]
             preserve_header_order: false,
             h09_responses: false,
             #[cfg(feature = "ffi")]
             on_informational: &mut None,
-            #[cfg(feature = "ffi")]
-            raw_headers: false,
         };
         let msg = Client::parse(&mut raw, ctx).unwrap().unwrap();
         assert_eq!(raw.len(), 0);
@@ -1711,20 +1739,16 @@ mod tests {
             cached_headers: &mut None,
             req_method: &mut Some(crate::Method::GET),
             h1_parser_config: Default::default(),
-            #[cfg(feature = "runtime")]
             h1_header_read_timeout: None,
-            #[cfg(feature = "runtime")]
             h1_header_read_timeout_fut: &mut None,
-            #[cfg(feature = "runtime")]
             h1_header_read_timeout_running: &mut false,
+            timer: Time::Empty,
             preserve_header_case: false,
             #[cfg(feature = "ffi")]
             preserve_header_order: false,
             h09_responses: false,
             #[cfg(feature = "ffi")]
             on_informational: &mut None,
-            #[cfg(feature = "ffi")]
-            raw_headers: false,
         };
         Client::parse(&mut raw, ctx).unwrap_err();
     }
@@ -1737,20 +1761,16 @@ mod tests {
             cached_headers: &mut None,
             req_method: &mut None,
             h1_parser_config: Default::default(),
-            #[cfg(feature = "runtime")]
             h1_header_read_timeout: None,
-            #[cfg(feature = "runtime")]
             h1_header_read_timeout_fut: &mut None,
-            #[cfg(feature = "runtime")]
             h1_header_read_timeout_running: &mut false,
+            timer: Time::Empty,
             preserve_header_case: true,
             #[cfg(feature = "ffi")]
             preserve_header_order: false,
             h09_responses: false,
             #[cfg(feature = "ffi")]
             on_informational: &mut None,
-            #[cfg(feature = "ffi")]
-            raw_headers: false,
         };
         let parsed_message = Server::parse(&mut raw, ctx).unwrap().unwrap();
         let orig_headers = parsed_message
@@ -1784,20 +1804,16 @@ mod tests {
                     cached_headers: &mut None,
                     req_method: &mut None,
                     h1_parser_config: Default::default(),
-                    #[cfg(feature = "runtime")]
                     h1_header_read_timeout: None,
-                    #[cfg(feature = "runtime")]
                     h1_header_read_timeout_fut: &mut None,
-                    #[cfg(feature = "runtime")]
                     h1_header_read_timeout_running: &mut false,
+                    timer: Time::Empty,
                     preserve_header_case: false,
                     #[cfg(feature = "ffi")]
                     preserve_header_order: false,
                     h09_responses: false,
                     #[cfg(feature = "ffi")]
                     on_informational: &mut None,
-                    #[cfg(feature = "ffi")]
-                    raw_headers: false,
                 },
             )
             .expect("parse ok")
@@ -1812,20 +1828,16 @@ mod tests {
                     cached_headers: &mut None,
                     req_method: &mut None,
                     h1_parser_config: Default::default(),
-                    #[cfg(feature = "runtime")]
                     h1_header_read_timeout: None,
-                    #[cfg(feature = "runtime")]
                     h1_header_read_timeout_fut: &mut None,
-                    #[cfg(feature = "runtime")]
                     h1_header_read_timeout_running: &mut false,
+                    timer: Time::Empty,
                     preserve_header_case: false,
                     #[cfg(feature = "ffi")]
                     preserve_header_order: false,
                     h09_responses: false,
                     #[cfg(feature = "ffi")]
                     on_informational: &mut None,
-                    #[cfg(feature = "ffi")]
-                    raw_headers: false,
                 },
             )
             .expect_err(comment)
@@ -2049,20 +2061,16 @@ mod tests {
                     cached_headers: &mut None,
                     req_method: &mut Some(Method::GET),
                     h1_parser_config: Default::default(),
-                    #[cfg(feature = "runtime")]
                     h1_header_read_timeout: None,
-                    #[cfg(feature = "runtime")]
                     h1_header_read_timeout_fut: &mut None,
-                    #[cfg(feature = "runtime")]
                     h1_header_read_timeout_running: &mut false,
+                    timer: Time::Empty,
                     preserve_header_case: false,
                     #[cfg(feature = "ffi")]
                     preserve_header_order: false,
                     h09_responses: false,
                     #[cfg(feature = "ffi")]
                     on_informational: &mut None,
-                    #[cfg(feature = "ffi")]
-                    raw_headers: false,
                 }
             )
             .expect("parse ok")
@@ -2077,20 +2085,16 @@ mod tests {
                     cached_headers: &mut None,
                     req_method: &mut Some(m),
                     h1_parser_config: Default::default(),
-                    #[cfg(feature = "runtime")]
                     h1_header_read_timeout: None,
-                    #[cfg(feature = "runtime")]
                     h1_header_read_timeout_fut: &mut None,
-                    #[cfg(feature = "runtime")]
                     h1_header_read_timeout_running: &mut false,
+                    timer: Time::Empty,
                     preserve_header_case: false,
                     #[cfg(feature = "ffi")]
                     preserve_header_order: false,
                     h09_responses: false,
                     #[cfg(feature = "ffi")]
                     on_informational: &mut None,
-                    #[cfg(feature = "ffi")]
-                    raw_headers: false,
                 },
             )
             .expect("parse ok")
@@ -2105,20 +2109,16 @@ mod tests {
                     cached_headers: &mut None,
                     req_method: &mut Some(Method::GET),
                     h1_parser_config: Default::default(),
-                    #[cfg(feature = "runtime")]
                     h1_header_read_timeout: None,
-                    #[cfg(feature = "runtime")]
                     h1_header_read_timeout_fut: &mut None,
-                    #[cfg(feature = "runtime")]
                     h1_header_read_timeout_running: &mut false,
+                    timer: Time::Empty,
                     preserve_header_case: false,
                     #[cfg(feature = "ffi")]
                     preserve_header_order: false,
                     h09_responses: false,
                     #[cfg(feature = "ffi")]
                     on_informational: &mut None,
-                    #[cfg(feature = "ffi")]
-                    raw_headers: false,
                 },
             )
             .expect_err("parse should err")
@@ -2384,6 +2384,24 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "client")]
+    #[test]
+    fn test_client_obs_fold_line() {
+        fn unfold(src: &str) -> String {
+            let mut buf = src.as_bytes().to_vec();
+            let mut idx = HeaderIndices {
+                name: (0, 0),
+                value: (0, buf.len()),
+            };
+            Client::obs_fold_line(&mut buf, &mut idx);
+            String::from_utf8(buf[idx.value.0..idx.value.1].to_vec()).unwrap()
+        }
+
+        assert_eq!(unfold("a normal line"), "a normal line",);
+
+        assert_eq!(unfold("obs\r\n fold\r\n\t line"), "obs fold line",);
+    }
+
     #[test]
     fn test_client_request_encode_title_case() {
         use crate::proto::BodyLength;
@@ -2610,20 +2628,16 @@ mod tests {
                 cached_headers: &mut None,
                 req_method: &mut Some(Method::GET),
                 h1_parser_config: Default::default(),
-                #[cfg(feature = "runtime")]
                 h1_header_read_timeout: None,
-                #[cfg(feature = "runtime")]
                 h1_header_read_timeout_fut: &mut None,
-                #[cfg(feature = "runtime")]
                 h1_header_read_timeout_running: &mut false,
+                timer: Time::Empty,
                 preserve_header_case: false,
                 #[cfg(feature = "ffi")]
                 preserve_header_order: false,
                 h09_responses: false,
                 #[cfg(feature = "ffi")]
                 on_informational: &mut None,
-                #[cfg(feature = "ffi")]
-                raw_headers: false,
             },
         )
         .expect("parse ok")
@@ -2702,20 +2716,16 @@ mod tests {
                     cached_headers: &mut headers,
                     req_method: &mut None,
                     h1_parser_config: Default::default(),
-                    #[cfg(feature = "runtime")]
                     h1_header_read_timeout: None,
-                    #[cfg(feature = "runtime")]
                     h1_header_read_timeout_fut: &mut None,
-                    #[cfg(feature = "runtime")]
                     h1_header_read_timeout_running: &mut false,
+                    timer: Time::Empty,
                     preserve_header_case: false,
                     #[cfg(feature = "ffi")]
                     preserve_header_order: false,
                     h09_responses: false,
                     #[cfg(feature = "ffi")]
                     on_informational: &mut None,
-                    #[cfg(feature = "ffi")]
-                    raw_headers: false,
                 },
             )
             .unwrap()
@@ -2750,20 +2760,16 @@ mod tests {
                     cached_headers: &mut headers,
                     req_method: &mut None,
                     h1_parser_config: Default::default(),
-                    #[cfg(feature = "runtime")]
                     h1_header_read_timeout: None,
-                    #[cfg(feature = "runtime")]
                     h1_header_read_timeout_fut: &mut None,
-                    #[cfg(feature = "runtime")]
                     h1_header_read_timeout_running: &mut false,
+                    timer: Time::Empty,
                     preserve_header_case: false,
                     #[cfg(feature = "ffi")]
                     preserve_header_order: false,
                     h09_responses: false,
                     #[cfg(feature = "ffi")]
                     on_informational: &mut None,
-                    #[cfg(feature = "ffi")]
-                    raw_headers: false,
                 },
             )
             .unwrap()

@@ -34,18 +34,11 @@ pub(super) enum Kind {
     /// An `io::Error` that occurred while trying to read or write to a network stream.
     #[cfg(any(feature = "http1", feature = "http2"))]
     Io,
-    /// Error occurred while connecting.
-    #[allow(unused)]
-    Connect,
     /// Error creating a TcpListener.
     #[cfg(all(feature = "tcp", feature = "server"))]
     Listen,
-    /// Error accepting on an Incoming stream.
-    #[cfg(any(feature = "http1", feature = "http2"))]
-    #[cfg(feature = "server")]
-    Accept,
     /// User took too long to send headers
-    #[cfg(all(feature = "http1", feature = "server", feature = "runtime"))]
+    #[cfg(all(feature = "http1", feature = "server"))]
     HeaderTimeout,
     /// Error while reading a body from connection.
     #[cfg(any(feature = "http1", feature = "http2"))]
@@ -91,15 +84,11 @@ pub(super) enum Header {
 
 #[derive(Debug)]
 pub(super) enum User {
-    /// Error calling user's HttpBody::poll_data().
+    /// Error calling user's Body::poll_data().
     #[cfg(any(feature = "http1", feature = "http2"))]
     Body,
     /// The user aborted writing of the outgoing body.
     BodyWriteAborted,
-    /// Error calling user's MakeService.
-    #[cfg(any(feature = "http1", feature = "http2"))]
-    #[cfg(feature = "server")]
-    MakeService,
     /// Error from future of user's Service.
     #[cfg(any(feature = "http1", feature = "http2"))]
     Service,
@@ -109,22 +98,10 @@ pub(super) enum User {
     #[cfg(any(feature = "http1", feature = "http2"))]
     #[cfg(feature = "server")]
     UnexpectedHeader,
-    /// User tried to create a Request with bad version.
-    #[cfg(any(feature = "http1", feature = "http2"))]
-    #[cfg(feature = "client")]
-    UnsupportedVersion,
-    /// User tried to create a CONNECT Request with the Client.
-    #[cfg(any(feature = "http1", feature = "http2"))]
-    #[cfg(feature = "client")]
-    UnsupportedRequestMethod,
     /// User tried to respond with a 1xx (not 101) response code.
     #[cfg(feature = "http1")]
     #[cfg(feature = "server")]
     UnsupportedStatusCode,
-    /// User tried to send a Request with Client with non-absolute URI.
-    #[cfg(any(feature = "http1", feature = "http2"))]
-    #[cfg(feature = "client")]
-    AbsoluteUriRequired,
 
     /// User tried polling for an upgrade that doesn't exist.
     NoUpgrade,
@@ -133,9 +110,9 @@ pub(super) enum User {
     #[cfg(feature = "http1")]
     ManualUpgrade,
 
-    /// User called `server::Connection::without_shutdown()` on an HTTP/2 conn.
-    #[cfg(feature = "server")]
-    WithoutShutdownNonHttp1,
+    /// The dispatch task is gone.
+    #[cfg(feature = "client")]
+    DispatchGone,
 
     /// User aborted in an FFI callback.
     #[cfg(feature = "ffi")]
@@ -179,11 +156,6 @@ impl Error {
     /// Returns true if a sender's channel is closed.
     pub fn is_closed(&self) -> bool {
         matches!(self.inner.kind, Kind::ChannelClosed)
-    }
-
-    /// Returns true if this was an error from `Connect`.
-    pub fn is_connect(&self) -> bool {
-        matches!(self.inner.kind, Kind::Connect)
     }
 
     /// Returns true if the connection closed before a message could complete.
@@ -278,18 +250,6 @@ impl Error {
         Error::new(Kind::Listen).with(cause)
     }
 
-    #[cfg(any(feature = "http1", feature = "http2"))]
-    #[cfg(feature = "server")]
-    pub(super) fn new_accept<E: Into<Cause>>(cause: E) -> Error {
-        Error::new(Kind::Accept).with(cause)
-    }
-
-    #[cfg(any(feature = "http1", feature = "http2"))]
-    #[cfg(feature = "client")]
-    pub(super) fn new_connect<E: Into<Cause>>(cause: E) -> Error {
-        Error::new(Kind::Connect).with(cause)
-    }
-
     pub(super) fn new_closed() -> Error {
         Error::new(Kind::ChannelClosed)
     }
@@ -318,33 +278,15 @@ impl Error {
         Error::new_user(User::UnexpectedHeader)
     }
 
-    #[cfg(all(feature = "http1", feature = "server", feature = "runtime"))]
+    #[cfg(all(feature = "http1", feature = "server"))]
     pub(super) fn new_header_timeout() -> Error {
         Error::new(Kind::HeaderTimeout)
-    }
-
-    #[cfg(any(feature = "http1", feature = "http2"))]
-    #[cfg(feature = "client")]
-    pub(super) fn new_user_unsupported_version() -> Error {
-        Error::new_user(User::UnsupportedVersion)
-    }
-
-    #[cfg(any(feature = "http1", feature = "http2"))]
-    #[cfg(feature = "client")]
-    pub(super) fn new_user_unsupported_request_method() -> Error {
-        Error::new_user(User::UnsupportedRequestMethod)
     }
 
     #[cfg(feature = "http1")]
     #[cfg(feature = "server")]
     pub(super) fn new_user_unsupported_status_code() -> Error {
         Error::new_user(User::UnsupportedStatusCode)
-    }
-
-    #[cfg(any(feature = "http1", feature = "http2"))]
-    #[cfg(feature = "client")]
-    pub(super) fn new_user_absolute_uri_required() -> Error {
-        Error::new_user(User::AbsoluteUriRequired)
     }
 
     pub(super) fn new_user_no_upgrade() -> Error {
@@ -357,12 +299,6 @@ impl Error {
     }
 
     #[cfg(any(feature = "http1", feature = "http2"))]
-    #[cfg(feature = "server")]
-    pub(super) fn new_user_make_service<E: Into<Cause>>(cause: E) -> Error {
-        Error::new_user(User::MakeService).with(cause)
-    }
-
-    #[cfg(any(feature = "http1", feature = "http2"))]
     pub(super) fn new_user_service<E: Into<Cause>>(cause: E) -> Error {
         Error::new_user(User::Service).with(cause)
     }
@@ -370,11 +306,6 @@ impl Error {
     #[cfg(any(feature = "http1", feature = "http2"))]
     pub(super) fn new_user_body<E: Into<Cause>>(cause: E) -> Error {
         Error::new_user(User::Body).with(cause)
-    }
-
-    #[cfg(feature = "server")]
-    pub(super) fn new_without_shutdown_not_h1() -> Error {
-        Error::new(Kind::User(User::WithoutShutdownNonHttp1))
     }
 
     #[cfg(feature = "http1")]
@@ -385,6 +316,11 @@ impl Error {
     #[cfg(feature = "ffi")]
     pub(super) fn new_user_aborted_by_callback() -> Error {
         Error::new_user(User::AbortedByCallback)
+    }
+
+    #[cfg(feature = "client")]
+    pub(super) fn new_user_dispatch_gone() -> Error {
+        Error::new(Kind::User(User::DispatchGone))
     }
 
     #[cfg(feature = "http2")]
@@ -431,14 +367,10 @@ impl Error {
             #[cfg(feature = "http1")]
             Kind::UnexpectedMessage => "received unexpected message from connection",
             Kind::ChannelClosed => "channel closed",
-            Kind::Connect => "error trying to connect",
             Kind::Canceled => "operation was canceled",
             #[cfg(all(feature = "server", feature = "tcp"))]
             Kind::Listen => "error creating server listener",
-            #[cfg(any(feature = "http1", feature = "http2"))]
-            #[cfg(feature = "server")]
-            Kind::Accept => "error accepting connection",
-            #[cfg(all(feature = "http1", feature = "server", feature = "runtime"))]
+            #[cfg(all(feature = "http1", feature = "server"))]
             Kind::HeaderTimeout => "read header from client timeout",
             #[cfg(any(feature = "http1", feature = "http2"))]
             Kind::Body => "error reading a body from connection",
@@ -452,37 +384,23 @@ impl Error {
             Kind::Io => "connection error",
 
             #[cfg(any(feature = "http1", feature = "http2"))]
-            Kind::User(User::Body) => "error from user's HttpBody stream",
+            Kind::User(User::Body) => "error from user's Body stream",
             Kind::User(User::BodyWriteAborted) => "user body write aborted",
-            #[cfg(any(feature = "http1", feature = "http2"))]
-            #[cfg(feature = "server")]
-            Kind::User(User::MakeService) => "error from user's MakeService",
             #[cfg(any(feature = "http1", feature = "http2"))]
             Kind::User(User::Service) => "error from user's Service",
             #[cfg(any(feature = "http1", feature = "http2"))]
             #[cfg(feature = "server")]
             Kind::User(User::UnexpectedHeader) => "user sent unexpected header",
-            #[cfg(any(feature = "http1", feature = "http2"))]
-            #[cfg(feature = "client")]
-            Kind::User(User::UnsupportedVersion) => "request has unsupported HTTP version",
-            #[cfg(any(feature = "http1", feature = "http2"))]
-            #[cfg(feature = "client")]
-            Kind::User(User::UnsupportedRequestMethod) => "request has unsupported HTTP method",
             #[cfg(feature = "http1")]
             #[cfg(feature = "server")]
             Kind::User(User::UnsupportedStatusCode) => {
                 "response has 1xx status code, not supported by server"
             }
-            #[cfg(any(feature = "http1", feature = "http2"))]
-            #[cfg(feature = "client")]
-            Kind::User(User::AbsoluteUriRequired) => "client requires absolute-form URIs",
             Kind::User(User::NoUpgrade) => "no upgrade available",
             #[cfg(feature = "http1")]
             Kind::User(User::ManualUpgrade) => "upgrade expected but low level API in use",
-            #[cfg(feature = "server")]
-            Kind::User(User::WithoutShutdownNonHttp1) => {
-                "without_shutdown() called on a non-HTTP/1 connection"
-            }
+            #[cfg(feature = "client")]
+            Kind::User(User::DispatchGone) => "dispatch task is gone",
             #[cfg(feature = "ffi")]
             Kind::User(User::AbortedByCallback) => "operation aborted by an application callback",
         }
