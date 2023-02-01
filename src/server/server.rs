@@ -1,7 +1,9 @@
 use std::error::Error as StdError;
 use std::fmt;
-#[cfg(feature = "tcp")]
+#[cfg(all(feature = "tcp", not(target_os = "wasi")))]
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
+#[cfg(all(feature = "tcp", target_os = "wasi"))]
+use wasmedge_wasi_socket::{SocketAddr, TcpListener as StdTcpListener};
 
 #[cfg(feature = "tcp")]
 use std::time::Duration;
@@ -571,27 +573,6 @@ impl<I, E> Builder<I, E> {
     doc(cfg(all(feature = "tcp", any(feature = "http1", feature = "http2"))))
 )]
 impl<E> Builder<AddrIncoming, E> {
-    /// Set the duration to remain idle before sending TCP keepalive probes.
-    ///
-    /// If `None` is specified, keepalive is disabled.
-    pub fn tcp_keepalive(mut self, keepalive: Option<Duration>) -> Self {
-        self.incoming.set_keepalive(keepalive);
-        self
-    }
-
-    /// Set the duration between two successive TCP keepalive retransmissions,
-    /// if acknowledgement to the previous keepalive transmission is not received.
-    pub fn tcp_keepalive_interval(mut self, interval: Option<Duration>) -> Self {
-        self.incoming.set_keepalive_interval(interval);
-        self
-    }
-
-    /// Set the number of retransmissions to be carried out before declaring that remote end is not available.
-    pub fn tcp_keepalive_retries(mut self, retries: Option<u32>) -> Self {
-        self.incoming.set_keepalive_retries(retries);
-        self
-    }
-
     /// Set the value of `TCP_NODELAY` option for accepted connections.
     pub fn tcp_nodelay(mut self, enabled: bool) -> Self {
         self.incoming.set_nodelay(enabled);

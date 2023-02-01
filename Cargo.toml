@@ -1,16 +1,19 @@
 [package]
-name = "hyper"
+name = "hyper_wasi"
 version = "0.14.23"
 description = "A fast and correct HTTP library."
 readme = "README.md"
-homepage = "https://hyper.rs"
-documentation = "https://docs.rs/hyper"
-repository = "https://github.com/hyperium/hyper"
+homepage = "https://github.com/WasmEdge/hyper"
+repository = "https://github.com/WasmEdge/hyper"
 license = "MIT"
 authors = ["Sean McArthur <sean@seanmonstar.com>"]
-keywords = ["http", "hyper", "hyperium"]
+keywords = ["http", "hyper", "hyperium", "wasi"]
 categories = ["network-programming", "web-programming::http-client", "web-programming::http-server"]
 edition = "2018"
+
+[lib]
+name = "hyper"
+path = "src/lib.rs"
 
 include = [
   "Cargo.toml",
@@ -28,18 +31,19 @@ http = "0.2"
 http-body = "0.4"
 httpdate = "1.0"
 httparse = "1.8"
-h2 = { version = "0.3.9", optional = true }
+h2_wasi = { version = "0.3.9", optional = true }
 itoa = "1"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 pin-project-lite = "0.2.4"
 tower-service = "0.3"
-tokio = { version = "1", features = ["sync"] }
+tokio_wasi = { version = "1", features = ["sync"] }
 want = "0.3"
 
 # Optional
 
 libc = { version = "0.2", optional = true }
 socket2 = { version = "0.4.7", optional = true, features = ["all"] }
+wasmedge_wasi_socket = {version = "0.4.2", optional = true }
 
 [dev-dependencies]
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
@@ -49,20 +53,20 @@ pretty_env_logger = "0.4"
 spmc = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1", features = [
+tokio_wasi = { version = "1", features = [
     "fs",
     "macros",
     "io-std",
     "io-util",
     "rt",
-    "rt-multi-thread", # so examples can use #[tokio::main]
+    # "rt-multi-thread", # so examples can use #[tokio::main]
     "sync",
     "time",
     "test-util",
 ] }
-tokio-test = "0.4"
-tokio-util = { version = "0.7", features = ["codec"] }
-tower = { version = "0.4", features = ["make", "util"] }
+# tokio-test = "0.4"
+tokio-util_wasi = { version = "0.7", features = ["codec"] }
+# tower = { version = "0.4", features = ["make", "util"] }
 url = "2.2"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
@@ -84,7 +88,7 @@ full = [
 
 # HTTP versions
 http1 = []
-http2 = ["h2"]
+http2 = ["h2_wasi"]
 
 # Client/Server
 client = []
@@ -96,14 +100,14 @@ stream = []
 # Tokio support
 runtime = [
     "tcp",
-    "tokio/rt",
-    "tokio/time",
+    "tokio_wasi/rt",
+    "tokio_wasi/time",
 ]
 tcp = [
-    "socket2",
-    "tokio/net",
-    "tokio/rt",
-    "tokio/time",
+    "wasmedge_wasi_socket",
+    "tokio_wasi/net",
+    "tokio_wasi/rt",
+    "tokio_wasi/time",
 ]
 
 # C-API support (currently unstable (no semver))

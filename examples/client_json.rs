@@ -8,7 +8,7 @@ use serde::Deserialize;
 // A simple type alias so as to DRY.
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let url = "http://jsonplaceholder.typicode.com/users".parse().unwrap();
     let users = fetch_json(url).await?;

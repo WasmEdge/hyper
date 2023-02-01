@@ -3,12 +3,11 @@
 use std::env;
 
 use hyper::{body::HttpBody as _, Client};
-use tokio::io::{self, AsyncWriteExt as _};
 
 // A simple type alias so as to DRY.
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     pretty_env_logger::init();
 
@@ -44,7 +43,8 @@ async fn fetch_url(url: hyper::Uri) -> Result<()> {
     // (instead of buffering and printing at the end).
     while let Some(next) = res.data().await {
         let chunk = next?;
-        io::stdout().write_all(&chunk).await?;
+        // io::stdout().write_all(&chunk).await?;
+        println!("{:?}", chunk);
     }
 
     println!("\n\nDone!");

@@ -1,8 +1,10 @@
 use std::fmt;
 use std::io;
+#[cfg(not(target_os = "wasi"))]
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::time::Duration;
-use socket2::TcpKeepalive;
+#[cfg(target_os = "wasi")]
+use wasmedge_wasi_socket::{SocketAddr, TcpListener as StdTcpListener};
 
 use tokio::net::TcpListener;
 use tokio::time::Sleep;
@@ -14,119 +16,38 @@ use crate::common::{task, Future, Pin, Poll};
 pub use self::addr_stream::AddrStream;
 use super::accept::Accept;
 
-#[derive(Default, Debug, Clone, Copy)]
-struct TcpKeepaliveConfig {
-    time: Option<Duration>,
-    interval: Option<Duration>,
-    retries: Option<u32>,
-}
-
-impl TcpKeepaliveConfig {
-    /// Converts into a `socket2::TcpKeealive` if there is any keep alive configuration.
-    fn into_socket2(self) -> Option<TcpKeepalive> {
-        let mut dirty = false;
-        let mut ka = TcpKeepalive::new();
-        if let Some(time) = self.time {
-            ka = ka.with_time(time);
-            dirty = true
-        }
-        if let Some(interval) = self.interval {
-            ka = Self::ka_with_interval(ka, interval, &mut dirty)
-        };
-        if let Some(retries) = self.retries {
-            ka = Self::ka_with_retries(ka, retries, &mut dirty)
-        };
-        if dirty {
-            Some(ka)
-        } else {
-            None
-        }
-    }
-
-    #[cfg(any(
-        target_os = "android",
-        target_os = "dragonfly",
-        target_os = "freebsd",
-        target_os = "fuchsia",
-        target_os = "illumos",
-        target_os = "linux",
-        target_os = "netbsd",
-        target_vendor = "apple",
-        windows,
-    ))]
-    fn ka_with_interval(ka: TcpKeepalive, interval: Duration, dirty: &mut bool) -> TcpKeepalive {
-        *dirty = true;
-        ka.with_interval(interval)
-    }
-
-    #[cfg(not(any(
-        target_os = "android",
-        target_os = "dragonfly",
-        target_os = "freebsd",
-        target_os = "fuchsia",
-        target_os = "illumos",
-        target_os = "linux",
-        target_os = "netbsd",
-        target_vendor = "apple",
-        windows,
-    )))]
-    fn ka_with_interval(ka: TcpKeepalive, _: Duration, _: &mut bool) -> TcpKeepalive {
-        ka  // no-op as keepalive interval is not supported on this platform
-    }
-
-    #[cfg(any(
-        target_os = "android",
-        target_os = "dragonfly",
-        target_os = "freebsd",
-        target_os = "fuchsia",
-        target_os = "illumos",
-        target_os = "linux",
-        target_os = "netbsd",
-        target_vendor = "apple",
-    ))]
-    fn ka_with_retries(ka: TcpKeepalive, retries: u32, dirty: &mut bool) -> TcpKeepalive {
-        *dirty = true;
-        ka.with_retries(retries)
-    }
-
-    #[cfg(not(any(
-        target_os = "android",
-        target_os = "dragonfly",
-        target_os = "freebsd",
-        target_os = "fuchsia",
-        target_os = "illumos",
-        target_os = "linux",
-        target_os = "netbsd",
-        target_vendor = "apple",
-    )))]
-    fn ka_with_retries(ka: TcpKeepalive, _: u32, _: &mut bool) -> TcpKeepalive {
-        ka  // no-op as keepalive retries is not supported on this platform
-    }
-}
-
 /// A stream of connections from binding to an address.
 #[must_use = "streams do nothing unless polled"]
 pub struct AddrIncoming {
     addr: SocketAddr,
     listener: TcpListener,
     sleep_on_errors: bool,
-    tcp_keepalive_config: TcpKeepaliveConfig,
     tcp_nodelay: bool,
     timeout: Option<Pin<Box<Sleep>>>,
 }
 
 impl AddrIncoming {
     pub(super) fn new(addr: &SocketAddr) -> crate::Result<Self> {
+        #[cfg(not(target_os = "wasi"))]
         let std_listener = StdTcpListener::bind(addr).map_err(crate::Error::new_listen)?;
-
+        #[cfg(target_os = "wasi")]
+        let std_listener = StdTcpListener::bind(addr, true).map_err(crate::Error::new_listen)?;
         AddrIncoming::from_std(std_listener)
     }
 
+    #[cfg(not(target_os = "wasi"))]
     pub(super) fn from_std(std_listener: StdTcpListener) -> crate::Result<Self> {
         // TcpListener::from_std doesn't set O_NONBLOCK
         std_listener
             .set_nonblocking(true)
             .map_err(crate::Error::new_listen)?;
+        let listener = TcpListener::from_std(std_listener).map_err(crate::Error::new_listen)?;
+        AddrIncoming::from_listener(listener)
+    }
+
+    #[cfg(target_os = "wasi")]
+    pub(super) fn from_std(std_listener: StdTcpListener) -> crate::Result<Self> {
+        // TcpListener::from_std doesn't set O_NONBLOCK
         let listener = TcpListener::from_std(std_listener).map_err(crate::Error::new_listen)?;
         AddrIncoming::from_listener(listener)
     }
@@ -143,7 +64,6 @@ impl AddrIncoming {
             listener,
             addr,
             sleep_on_errors: true,
-            tcp_keepalive_config: TcpKeepaliveConfig::default(),
             tcp_nodelay: false,
             timeout: None,
         })
@@ -152,27 +72,6 @@ impl AddrIncoming {
     /// Get the local address bound to this listener.
     pub fn local_addr(&self) -> SocketAddr {
         self.addr
-    }
-
-    /// Set the duration to remain idle before sending TCP keepalive probes.
-    ///
-    /// If `None` is specified, keepalive is disabled.
-    pub fn set_keepalive(&mut self, time: Option<Duration>) -> &mut Self {
-        self.tcp_keepalive_config.time = time;
-        self
-    }
-
-    /// Set the duration between two successive TCP keepalive retransmissions,
-    /// if acknowledgement to the previous keepalive transmission is not received.
-    pub fn set_keepalive_interval(&mut self, interval: Option<Duration>) -> &mut Self {
-        self.tcp_keepalive_config.interval = interval;
-        self
-    }
-
-    /// Set the number of retransmissions to be carried out before declaring that remote end is not available.
-    pub fn set_keepalive_retries(&mut self, retries: Option<u32>) -> &mut Self {
-        self.tcp_keepalive_config.retries = retries;
-        self
     }
 
     /// Set the value of `TCP_NODELAY` option for accepted connections.
@@ -210,12 +109,7 @@ impl AddrIncoming {
         loop {
             match ready!(self.listener.poll_accept(cx)) {
                 Ok((socket, remote_addr)) => {
-                    if let Some(tcp_keepalive) = &self.tcp_keepalive_config.into_socket2() {
-                        let sock_ref = socket2::SockRef::from(&socket);
-                        if let Err(e) = sock_ref.set_tcp_keepalive(tcp_keepalive) {
-                            trace!("error trying to set TCP keepalive: {}", e);
-                        }
-                    }
+                    #[cfg(not(target_os = "wasi"))]
                     if let Err(e) = socket.set_nodelay(self.tcp_nodelay) {
                         trace!("error trying to set TCP nodelay: {}", e);
                     }
@@ -289,7 +183,6 @@ impl fmt::Debug for AddrIncoming {
         f.debug_struct("AddrIncoming")
             .field("addr", &self.addr)
             .field("sleep_on_errors", &self.sleep_on_errors)
-            .field("tcp_keepalive_config", &self.tcp_keepalive_config)
             .field("tcp_nodelay", &self.tcp_nodelay)
             .finish()
     }
@@ -421,12 +314,6 @@ mod addr_stream {
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
-    use crate::server::tcp::TcpKeepaliveConfig;
-
-    #[test]
-    fn no_tcp_keepalive_config() {
-        assert!(TcpKeepaliveConfig::default().into_socket2().is_none());
-    }
 
     #[test]
     fn tcp_keepalive_time_config() {

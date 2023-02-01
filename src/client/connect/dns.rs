@@ -23,11 +23,16 @@
 //! ```
 use std::error::Error;
 use std::future::Future;
+#[cfg(not(target_os = "wasi"))]
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs};
+#[cfg(target_os = "wasi")]
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 use std::pin::Pin;
 use std::str::FromStr;
 use std::task::{self, Poll};
 use std::{fmt, io, vec};
+#[cfg(target_os = "wasi")]
+use wasmedge_wasi_socket::{nslookup, SocketAddr};
 
 use tokio::task::JoinHandle;
 use tower_service::Service;
@@ -118,13 +123,20 @@ impl Service<Name> for GaiResolver {
     }
 
     fn call(&mut self, name: Name) -> Self::Future {
+        #[cfg(not(target_os = "wasi"))]
         let blocking = tokio::task::spawn_blocking(move || {
             debug!("resolving host={:?}", name.host);
             (&*name.host, 0)
                 .to_socket_addrs()
                 .map(|i| SocketAddrs { iter: i })
         });
-
+        #[cfg(target_os = "wasi")]
+        let blocking = tokio::task::spawn(async move {
+            debug!("resolving host={:?}", name.host);
+            nslookup(&*name.host, "http").map(|i| SocketAddrs {
+                iter: i.into_iter(),
+            })
+        });
         GaiFuture { inner: blocking }
     }
 }
@@ -318,7 +330,7 @@ impl Future for TokioThreadpoolGaiFuture {
 */
 
 mod sealed {
-    use super::{SocketAddr, Name};
+    use super::{Name, SocketAddr};
     use crate::common::{task, Future, Poll};
     use tower_service::Service;
 

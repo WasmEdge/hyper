@@ -9,7 +9,7 @@ async fn hello(_: Request<Body>) -> Result<Response<Body>, Infallible> {
     Ok(Response::new(Body::from("Hello World!")))
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 pub async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     pretty_env_logger::init();
 

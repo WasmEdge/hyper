@@ -362,7 +362,10 @@ impl Connection for TcpStream {
     fn connected(&self) -> Connected {
         let connected = Connected::new();
         if let (Ok(remote_addr), Ok(local_addr)) = (self.peer_addr(), self.local_addr()) {
-            connected.extra(HttpInfo { remote_addr, local_addr })
+            connected.extra(HttpInfo {
+                remote_addr,
+                local_addr,
+            })
         } else {
             connected
         }
@@ -557,6 +560,9 @@ impl ConnectingTcpRemote {
     }
 }
 
+#[cfg(target_os = "wasi")]
+use wasmedge_wasi_socket::socket as socket2;
+
 fn bind_local_address(
     socket: &socket2::Socket,
     dst_addr: &SocketAddr,
@@ -593,19 +599,28 @@ fn connect(
     // TODO(eliza): if Tokio's `TcpSocket` gains support for setting the
     // keepalive timeout, it would be nice to use that instead of socket2,
     // and avoid the unsafe `into_raw_fd`/`from_raw_fd` dance...
-    use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
-    use std::convert::TryInto;
+    #[cfg(not(target_os = "wasi"))]
+    let socket = {
+        use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
+        use std::convert::TryInto;
 
-    let domain = Domain::for_address(*addr);
-    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))
-        .map_err(ConnectError::m("tcp open error"))?;
-
+        let domain = Domain::for_address(*addr);
+        Socket::new(domain, Type::STREAM, Some(Protocol::TCP))
+            .map_err(ConnectError::m("tcp open error"))?
+    };
+    #[cfg(target_os = "wasi")]
+    let socket = {
+        use wasmedge_wasi_socket::socket::{AddressFamily, Socket, SocketType};
+        let domain = AddressFamily::from(addr);
+        Socket::new(domain, SocketType::Stream).map_err(ConnectError::m("tcp open error"))?
+    };
     // When constructing a Tokio `TcpSocket` from a raw fd/socket, the user is
     // responsible for ensuring O_NONBLOCK is set.
     socket
         .set_nonblocking(true)
         .map_err(ConnectError::m("tcp set_nonblocking error"))?;
 
+    #[cfg(not(target_os = "wasi"))]
     if let Some(dur) = config.keep_alive_timeout {
         let conf = TcpKeepalive::new().with_time(dur);
         if let Err(e) = socket.set_tcp_keepalive(&conf) {
@@ -639,19 +654,26 @@ fn connect(
         use std::os::windows::io::{FromRawSocket, IntoRawSocket};
         TcpSocket::from_raw_socket(socket.into_raw_socket())
     };
-
+    #[cfg(target_os = "wasi")]
+    let socket = unsafe {
+        use std::os::wasi::io::{FromRawFd, IntoRawFd};
+        TcpSocket::from_raw_fd(socket.into_raw_fd())
+    };
+    #[cfg(not(target_os = "wasi"))]
     if config.reuse_address {
         if let Err(e) = socket.set_reuseaddr(true) {
             warn!("tcp set_reuse_address error: {}", e);
         }
     }
 
+    #[cfg(not(target_os = "wasi"))]
     if let Some(size) = config.send_buffer_size {
         if let Err(e) = socket.set_send_buffer_size(size.try_into().unwrap_or(std::u32::MAX)) {
             warn!("tcp set_buffer_size error: {}", e);
         }
     }
 
+    #[cfg(not(target_os = "wasi"))]
     if let Some(size) = config.recv_buffer_size {
         if let Err(e) = socket.set_recv_buffer_size(size.try_into().unwrap_or(std::u32::MAX)) {
             warn!("tcp set_recv_buffer_size error: {}", e);
