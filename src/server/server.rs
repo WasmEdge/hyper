@@ -5,8 +5,8 @@ use std::net::{SocketAddr, TcpListener as StdTcpListener};
 #[cfg(all(feature = "tcp", target_os = "wasi"))]
 use wasmedge_wasi_socket::{SocketAddr, TcpListener as StdTcpListener};
 
-#[cfg(feature = "tcp")]
-use std::time::Duration;
+// #[cfg(feature = "tcp")]
+// use std::time::Duration;
 
 use pin_project_lite::pin_project;
 

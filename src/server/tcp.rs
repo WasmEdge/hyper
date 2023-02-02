@@ -8,7 +8,7 @@ use wasmedge_wasi_socket::{SocketAddr, TcpListener as StdTcpListener};
 
 use tokio::net::TcpListener;
 use tokio::time::Sleep;
-use tracing::{debug, error, trace};
+use tracing::{debug, error};
 
 use crate::common::{task, Future, Pin, Poll};
 
