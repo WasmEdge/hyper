@@ -43,7 +43,7 @@ want = "0.3"
 
 libc = { version = "0.2", optional = true }
 socket2 = { version = "0.4.7", optional = true, features = ["all"] }
-wasmedge_wasi_socket = {version = "0.4.2", optional = true }
+wasmedge_wasi_socket = {version = "0.4.3", optional = true }
 
 [dev-dependencies]
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }

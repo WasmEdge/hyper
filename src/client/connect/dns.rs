@@ -32,7 +32,7 @@ use std::str::FromStr;
 use std::task::{self, Poll};
 use std::{fmt, io, vec};
 #[cfg(target_os = "wasi")]
-use wasmedge_wasi_socket::{nslookup, SocketAddr};
+use wasmedge_wasi_socket::{SocketAddr, ToSocketAddrs};
 
 use tokio::task::JoinHandle;
 use tower_service::Service;
@@ -133,9 +133,9 @@ impl Service<Name> for GaiResolver {
         #[cfg(target_os = "wasi")]
         let blocking = tokio::task::spawn(async move {
             debug!("resolving host={:?}", name.host);
-            nslookup(&*name.host, "http").map(|i| SocketAddrs {
-                iter: i.into_iter(),
-            })
+            (&*name.host, 0)
+                .to_socket_addrs()
+                .map(|i| SocketAddrs { iter: i })
         });
         GaiFuture { inner: blocking }
     }
