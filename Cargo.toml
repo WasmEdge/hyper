@@ -1,6 +1,6 @@
 [package]
 name = "hyper_wasi"
-version = "0.14.23"
+version = "0.15.2"
 description = "A fast and correct HTTP library."
 readme = "README.md"
 homepage = "https://github.com/WasmEdge/hyper"
