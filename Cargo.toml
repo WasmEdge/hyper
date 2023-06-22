@@ -11,16 +11,16 @@ keywords = ["http", "hyper", "hyperium", "wasi"]
 categories = ["network-programming", "web-programming::http-client", "web-programming::http-server"]
 edition = "2018"
 
-[lib]
-name = "hyper"
-path = "src/lib.rs"
-
 include = [
   "Cargo.toml",
   "LICENSE",
   "src/**/*",
   #"build.rs",
 ]
+
+[lib]
+name = "hyper"
+path = "src/lib.rs"
 
 [dependencies]
 bytes = "1"
@@ -31,7 +31,7 @@ http = "0.2"
 http-body = "0.4"
 httpdate = "1.0"
 httparse = "1.8"
-h2_wasi = { version = "0.3.9", optional = true }
+h2_wasi = {version = "0.3.19", optional = true }
 itoa = "1"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 pin-project-lite = "0.2.4"
@@ -112,6 +112,12 @@ tcp = [
 
 # C-API support (currently unstable (no semver))
 ffi = ["libc"]
+
+# enable 1.0 backports
+backports = []
+
+# whether or not to display deprecation warnings
+deprecated = []
 
 # internal features used in CI
 nightly = []

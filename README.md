@@ -18,6 +18,16 @@ Note: We do not yet support SSL / TLS connections in hyper_wasi yet.
 
 **Get started** by looking over the [guides](https://hyper.rs/guides).
 
+## "Low-level"
+
+hyper is a relatively low-level library, meant to be a building block for
+libraries and applications.
+
+If you are looking for a convenient HTTP client, then you may wish to consider
+[reqwest](https://github.com/WasmEdge/reqwest). If you are looking for a
+convenient HTTP server, then you may wish to consider [Axum](https://github.com/WasmEdge/tokio).
+Both are built on top of this library.
+
 ## Contributing
 
 To get involved, take a look at [CONTRIBUTING](CONTRIBUTING.md).
